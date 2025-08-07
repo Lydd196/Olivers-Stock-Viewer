@@ -10,13 +10,29 @@ from kivy_garden.matplotlib import FigureCanvasKivyAgg
 import matplotlib.dates as mdates
 from kivy.core.window import Window
 
+# Maximize the application window on startup
+Window.maximize()
 
-# Set window size to screen resolution
-Window.size = (1920, 1080)
+#Attempts to resolve a stock ticker by checking if it's a US ticker first.
+#If not, it falls back to trying the UK (.L) ticker suffix.
+def resolveTicker(userInput):
+    userInput = userInput.upper().strip()
 
+    if '.' in userInput:
+        return userInput
 
+    try:
+        stock = yf.Ticker(userInput)
+        data = stock.history(period="1d")
+        if not data.empty:
+            return userInput
+    except Exception:
+        pass
 
-def get_stock_info(symbol):
+    return userInput + ".L"
+
+#Fetches the current stock price and currency for a given ticker symbol.
+def getStockInfo(symbol):
     try:
         stock = yf.Ticker(symbol)
         data = stock.history(period="1d")
@@ -28,8 +44,8 @@ def get_stock_info(symbol):
     except Exception:
         return None, None
 
-
-def get_stock_history(symbol, period="1d", interval="15m"):
+#Gets historical closing prices and corresponding datetime objects for a given stock.
+def getStockHistory(symbol, period="1d", interval="15m"):
     try:
         stock = yf.Ticker(symbol)
         data = stock.history(period=period, interval=interval)
@@ -41,104 +57,133 @@ def get_stock_history(symbol, period="1d", interval="15m"):
     except Exception:
         return None, None
 
-
+#Main Kivy application class for the stock viewer
 class StockApp(App):
+    #Main Kivy build method to construct the UI layout
     def build(self):
-        self.layout = BoxLayout(orientation='vertical', padding=10, spacing=10)
+        self.title = "Stock Viewer"
+        self.mainLayout = BoxLayout(orientation='vertical', padding=10, spacing=10)
 
-        self.symbol_input = TextInput(
-            hint_text='Enter stock symbol (e.g., AAPL, VOD.L)', multiline=False
+        self.symbolInput = TextInput(
+            hint_text='Enter stock symbol (e.g., AAPL, VWRP, NVDA, etc.) Funds on multiple exchanges may require the exchange ticker for local pricing (e.g., TSCO.L, NA.TA, SHEL.L, etc.) Similar rules needed for cryptoassets for currency equivalents (e.g., BTC-GBP, ETH-AUD, BTC-JPY, etc.)',
+            multiline=False
         )
-        fetch_button = Button(text='Get Stock Data', size_hint=(1, None), height=40)
-        fetch_button.bind(on_press=self.fetch_data)
+        fetchButton = Button(text='Get Stock Data', size_hint=(1, None), height=40)
+        fetchButton.bind(on_press=self.fetchData)
 
-        self.period_spinner = Spinner(
+        self.periodSpinner = Spinner(
             text='1 Day',
             values=('1 Day', '1 Week', '1 Month', '3 Months', '1 Year'),
             size_hint=(None, None),
             size=(150, 44)
         )
-        self.period_spinner.bind(text=self.on_period_select)
+        self.periodSpinner.bind(text=self.onPeriodSelect)
 
-        self.result_label = Label(text='Price and currency will appear here', size_hint=(1, None), height=40)
+        self.resultLabel = Label(text='Price and currency will appear here', size_hint=(1, None), height=40)
 
-        self.chart_box = BoxLayout(size_hint_y=2)
+        self.chartBox = BoxLayout(size_hint_y=2)
 
-        self.layout.add_widget(self.symbol_input)
-        self.layout.add_widget(fetch_button)
-        self.layout.add_widget(self.period_spinner)
-        self.layout.add_widget(self.result_label)
-        self.layout.add_widget(self.chart_box)
+        self.mainLayout.add_widget(self.symbolInput)
+        self.mainLayout.add_widget(fetchButton)
+        self.mainLayout.add_widget(self.periodSpinner)
+        self.mainLayout.add_widget(self.resultLabel)
+        self.mainLayout.add_widget(self.chartBox)
 
-        self.current_symbol = None
-        self.current_currency = None
+        self.currentSymbol = None
+        self.currentCurrency = None
+        self.currentCanvas = None
+        self.hoverCid = None
 
-        return self.layout
+        return self.mainLayout
+    
+    #Triggered when the user selects a new period in the dropdown
+    def onPeriodSelect(self, spinner, text):
+        if self.currentSymbol:
+            self.updateChart(self.currentSymbol, text)
 
-    def on_period_select(self, spinner, text):
-        if self.current_symbol:
-            self.update_chart(self.current_symbol, text)
-
-    def fetch_data(self, instance):
-        symbol = self.symbol_input.text.strip().upper()
-        price, currency = get_stock_info(symbol)
+    #Fetch stock data when the user presses the fetch button
+    def fetchData(self, instance):
+        rawInput = self.symbolInput.text
+        symbol = resolveTicker(rawInput)
+        price, currency = getStockInfo(symbol)
         if price is None:
-            self.result_label.text = "Error fetching data. Check symbol."
-            self.chart_box.clear_widgets()
+            self.resultLabel.text = "Error fetching data. Check symbol."
+            self.clearChart()
             return
+        
+        #Try to get the full name of the asset
+        try:
+            stock = yf.Ticker(symbol)
+            info = stock.info
+            name = info.get("shortName") or info.get("longName") or "Unknown Name"
+        except Exception:
+            name = "Unknown Name"
 
-        self.result_label.text = f"{symbol}: {price:.2f} {currency}"
-        self.current_symbol = symbol
-        self.current_currency = currency
+        self.resultLabel.text = f"{name} ({symbol}): {price:.2f} {currency}"
+        self.currentSymbol = symbol
+        self.currentCurrency = currency
 
-        self.update_chart(symbol, self.period_spinner.text)
+        self.updateChart(symbol, self.periodSpinner.text)
 
-    def update_chart(self, symbol, period_text):
-        period_map = {
+    #Updates the matplotlib chart with new data for the selected period
+    def updateChart(self, symbol, periodText):
+        periodMap = {
             '1 Day': ("1d", "15m"),
             '1 Week': ("5d", "1h"),
             '1 Month': ("1mo", "1d"),
             '3 Months': ("3mo", "1d"),
             '1 Year': ("1y", "1d"),
         }
-        period, interval = period_map.get(period_text, ("1d", "15m"))
-        prices, dates = get_stock_history(symbol, period=period, interval=interval)
+        period, interval = periodMap.get(periodText, ("1d", "15m"))
+        prices, dates = getStockHistory(symbol, period=period, interval=interval)
 
         if prices and dates:
-            self.show_chart(prices, dates, self.current_currency)
+            self.showChart(prices, dates, self.currentCurrency)
         else:
-            self.chart_box.clear_widgets()
-            self.result_label.text = "No data available for selected period."
+            self.clearChart()
+            self.resultLabel.text = "No data available for selected period."
 
-    def show_chart(self, prices, dates, currency):
-        self.chart_box.clear_widgets()
-        fig, ax = plt.subplots(figsize=(10, 6))  # Bigger figure
+    #Clears the currently displayed chart from the UI
+    def clearChart(self):
+        if self.currentCanvas:
+            if self.hoverCid is not None:
+                self.currentCanvas.figure.canvas.mpl_disconnect(self.hoverCid)
+                self.hoverCid = None
 
+            self.chartBox.remove_widget(self.currentCanvas)
+            self.currentCanvas.figure.clf()
+            plt.close(self.currentCanvas.figure)
+            self.currentCanvas = None
+
+    # Displays the stock price chart with hover annotations
+    def showChart(self, prices, dates, currency):
+        self.clearChart()
+
+        fig, ax = plt.subplots(figsize=(10, 6))
         line, = ax.plot(dates, prices, marker='o')
         ax.set_title("Stock Prices")
         ax.set_xlabel("Date / Time")
         ax.set_ylabel(f"Price ({currency})")
 
-        # Format x-axis with date/time
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
         fig.autofmt_xdate(rotation=20)
 
-        # Add padding on x-axis so points aren't squeezed at edges
-        x_min = min(dates)
-        x_max = max(dates)
-        x_range = x_max - x_min
-        ax.set_xlim(x_min - x_range * 0.05, x_max + x_range * 0.05)
+        xMin = min(dates)
+        xMax = max(dates)
+        xRange = xMax - xMin
+        ax.set_xlim(xMin - xRange * 0.05, xMax + xRange * 0.05)
 
+        #Tooltip setup
         annot = ax.annotate("", xy=(0, 0), xytext=(15, 15),
                             textcoords="offset points",
                             bbox=dict(boxstyle="round", fc="w"),
                             arrowprops=dict(arrowstyle="->"))
         annot.set_visible(False)
 
-        # Convert dates to matplotlib float format for easier distance calc
-        dates_num = mdates.date2num(dates)
+        datesNum = mdates.date2num(dates)
 
-        def update_annot(idx):
+        #Updates tooltip annotation
+        def updateAnnot(idx):
             y = prices[idx]
             dt = dates[idx]
             annot.xy = (dates[idx], y)
@@ -146,21 +191,20 @@ class StockApp(App):
             annot.set_text(text)
             annot.get_bbox_patch().set_alpha(0.9)
 
+        #Handles hover interactions with the chart
         def hover(event):
             vis = annot.get_visible()
             if event.inaxes == ax:
-                mouse_x = event.xdata
-                if mouse_x is None:
+                mouseX = event.xdata
+                if mouseX is None:
                     return
 
-                # Find index of closest date point on x axis
-                idx = min(range(len(dates_num)), key=lambda i: abs(dates_num[i] - mouse_x))
+                idx = min(range(len(datesNum)), key=lambda i: abs(datesNum[i] - mouseX))
 
-                # Threshold for horizontal proximity (3% of x-axis range)
-                threshold = (dates_num[-1] - dates_num[0]) * 0.03
+                threshold = (datesNum[-1] - datesNum[0]) * 0.03
 
-                if abs(dates_num[idx] - mouse_x) < threshold:
-                    update_annot(idx)
+                if abs(datesNum[idx] - mouseX) < threshold:
+                    updateAnnot(idx)
                     if not vis:
                         annot.set_visible(True)
                     fig.canvas.draw_idle()
@@ -173,10 +217,11 @@ class StockApp(App):
                     annot.set_visible(False)
                     fig.canvas.draw_idle()
 
-        fig.canvas.mpl_connect("motion_notify_event", hover)
+        self.hoverCid = fig.canvas.mpl_connect("motion_notify_event", hover)
 
-        self.chart_box.add_widget(FigureCanvasKivyAgg(fig))
+        self.currentCanvas = FigureCanvasKivyAgg(fig)
+        self.chartBox.add_widget(self.currentCanvas)
 
-
+#Only runs when executed directly
 if __name__ == '__main__':
     StockApp().run()
