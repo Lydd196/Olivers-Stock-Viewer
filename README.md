@@ -1,4 +1,4 @@
-#**Olivers-Stock_Viewer**
+# **Olivers-Stock_Viewer**
 
 **Olivers-Stock_Viewer** is a Kivy Python application that shows stock information and historic close figures for stocks, etfs, cryptoassets, etc. It uses the Yahoo Finance API to collect said data and Matplotlib to display it.
 
